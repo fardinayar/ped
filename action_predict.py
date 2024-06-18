@@ -11,11 +11,11 @@ from tensorflow.keras.layers import GRU, LSTM, GRUCell
 from tensorflow.keras.layers import Dropout, LSTMCell, RNN
 from tensorflow.keras.utils import plot_model
 from tensorflow.keras.layers import Flatten, Average, Add
-from tensorflow.keras.layers import ConvLSTM2D, Conv2D
+from tensorflow.keras.layers import ConvLSTM2D, Conv2D, MultiHeadAttention
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping, ModelCheckpoint
 from tensorflow.keras.applications import vgg16, resnet50
-from tensorflow.keras.layers import GlobalAveragePooling2D, GlobalMaxPooling2D, Lambda, dot, concatenate, Activation
+from tensorflow.keras.layers import GlobalAveragePooling2D, GlobalMaxPooling2D, Lambda, dot, concatenate, Activation, GlobalAvgPool1D
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow.keras import regularizers
 from tensorflow.keras import backend as K
@@ -25,8 +25,7 @@ from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
 from sklearn.svm import LinearSVC
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-
-
+from transformer import EncoderLayer
 ## For deeplabV3 (segmentation)
 import numpy as np
 from PIL import Image
@@ -39,6 +38,10 @@ import os
 import time
 import scipy.misc
 import cv2
+np.object = object    
+np.int = int    
+np.bool = bool    
+from transformers import AutoProcessor, TFCLIPModel
 
 # from tensorflow.compat.v1 import ConfigProto
 # from tensorflow.compat.v1 import InteractiveSession
@@ -99,7 +102,7 @@ class DeepLabModel(object):
         width, height = image.size
         resize_ratio = 1.0 * self.INPUT_SIZE / max(width, height)
         target_size = (int(resize_ratio * width), int(resize_ratio * height))
-        resized_image = image.convert('RGB').resize(target_size, Image.ANTIALIAS)
+        resized_image = image.convert('RGB').resize(target_size, Image.LANCZOS)
         batch_seg_map = self.sess.run(
             self.OUTPUT_TENSOR_NAME,
             feed_dict={self.INPUT_TENSOR_NAME: [np.asarray(resized_image)]})
@@ -295,9 +298,10 @@ class ActionPredict(object):
         FULL_LABEL_MAP = np.arange(len(LABEL_NAMES)).reshape(len(LABEL_NAMES), 1)
         FULL_COLOR_MAP = label_to_color_image(FULL_LABEL_MAP)
         ##########################
-        preprocess_dict = {'vgg16': vgg16.preprocess_input, 'resnet50': resnet50.preprocess_input}
-        backbone_dict = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50}
-
+        preprocess_dict = {'vgg16': vgg16.preprocess_input, 'resnet50': resnet50.preprocess_input, 'CLIP': AutoProcessor.from_pretrained("openai/clip-vit-base-patch32")}
+        backbone_dict = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50, 'CLIP': TFCLIPModel.from_pretrained("openai/clip-vit-base-patch32")}
+        clip_processor = AutoProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        clip_model = TFCLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         preprocess_input = preprocess_dict.get(self._backbone, None)
         if process:
             assert (self._backbone in ['vgg16', 'resnet50']), "{} is not supported".format(self._backbone)
@@ -345,10 +349,9 @@ class ActionPredict(object):
                         img = image.load_img(imp, target_size=(224, 224))
                         x = image.img_to_array(img)
                         x = np.expand_dims(x, axis=0)
-                        x = tf.keras.applications.vgg19.preprocess_input(x)
-                        block4_pool_features = VGGmodel.predict(x)
+                        x = clip_processor(images=x, return_tensors="tf")
+                        block4_pool_features = clip_model.get_image_features(**x)
                         img_features = block4_pool_features
-                        img_features = tf.nn.avg_pool2d(img_features, ksize=[14, 14], strides=[1, 1, 1, 1], padding='VALID')
                         img_features = tf.squeeze(img_features)
                         # with tf.compact.v1.Session():
                         img_features = img_features.numpy()
@@ -384,10 +387,9 @@ class ActionPredict(object):
                         # img = image.load_img(imp, target_size=(224, 224))
                         x = image.img_to_array(img)
                         x = np.expand_dims(x, axis=0)
-                        x = tf.keras.applications.vgg19.preprocess_input(x)
-                        block4_pool_features = VGGmodel.predict(x)
+                        x = clip_processor(images=x, return_tensors="tf")
+                        block4_pool_features = clip_model.get_image_features(**x)
                         img_features = block4_pool_features
-                        img_features = tf.nn.avg_pool2d(img_features, ksize=[14, 14], strides=[1, 1, 1, 1], padding='VALID')
                         img_features = tf.squeeze(img_features)
                         # with tf.compact.v1.Session():
                         img_features = img_features.numpy()
@@ -1060,7 +1062,7 @@ class ActionPredict(object):
                                   callbacks=callbacks)
         if 'checkpoint' not in learning_scheduler:
             print('Train model is saved to {}'.format(model_path))
-            train_model.save(model_path)
+            train_model.save(model_path,save_format='tf')
 
         # Save data options and configurations
         model_opts_path, _ = get_path(**path_params, file_name='model_opts.pkl')
@@ -1096,7 +1098,7 @@ class ActionPredict(object):
             # except:
             #     model_opts = pickle.load(fid, encoding='bytes')
 
-        test_model = load_model(os.path.join(model_path, 'model.h5'))
+        test_model = load_model(os.path.join(model_path, 'model.h5'), custom_objects={'EncoderLayer':EncoderLayer})
         test_model.summary()
 
         test_data = self.get_data('test', data_test, {**opts['model_opts'], 'batch_size': 1})
@@ -4870,11 +4872,12 @@ class MASK_PCPA_2D(ActionPredict):
 
         network_inputs.append(Input(shape=data_sizes[0], name='input_cnn_' + data_types[0]))
         encoder_outputs.append(
-            self._rnn(name='enc_' + data_types[0], r_sequence=return_sequence)(network_inputs[0]))
-
+            EncoderLayer(4, data_sizes[0][-1], attention_size, 0.5)(network_inputs[0], None)[0] #self._rnn(name='enc_' + data_types[0], r_sequence=return_sequence)(network_inputs[0]))
+        )
         network_inputs.append(Input(shape=data_sizes[1], name='input_cnn2_' + data_types[1]))
         encoder_outputs.append(
-            self._rnn(name='enc2_' + data_types[1], r_sequence=return_sequence)(network_inputs[1]))
+            EncoderLayer(4, data_sizes[1][-1], attention_size, 0.5)(network_inputs[1], None)[0] #self._rnn(name='enc2_' + data_types[1], r_sequence=return_sequence)(network_inputs[1]))
+        )
         # encoder_outputs.append(x)
 
         # output = Dense(self._num_classes,
@@ -4885,8 +4888,9 @@ class MASK_PCPA_2D(ActionPredict):
 
         for i in range(2, core_size):
             network_inputs.append(Input(shape=data_sizes[i], name='input_' + data_types[i]))
-            encoder_outputs.append(
-                self._rnn(name='enc_' + data_types[i], r_sequence=return_sequence)(network_inputs[i]))
+            encoder_input = Dense(attention_size)(network_inputs[i])
+            encoder_output = EncoderLayer(4, attention_size, attention_size, 0.5)(encoder_input, None)[0]#self._rnn(name='enc_1_' + data_types[i], r_sequence=return_sequence)(network_inputs[i])
+            encoder_outputs.append(encoder_output)
 
         if len(encoder_outputs) > 1:
             att_enc_out = []
@@ -4903,9 +4907,8 @@ class MASK_PCPA_2D(ActionPredict):
                 att_enc_out.append(x)
             # aplly many-to-one attention block to the attended modalities
             x = Concatenate(name='concat_modalities', axis=1)(att_enc_out)
-            encodings = attention_3d_block(x, dense_size=attention_size, modality='_modality')
-
-            # print(encodings.shape)
+            encodings = MultiHeadAttention(4, attention_size)(x, x)#attention_3d_block(x, dense_size=attention_size, modality='_modality')
+            encodings = GlobalAvgPool1D()(encodings)
             # print(weights_softmax.shape)
         else:
             encodings = encoder_outputs[0]

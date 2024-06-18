@@ -32,7 +32,7 @@ for gpu in gpus:
 
 
 # path to JAAD dataset, please change to your local path
-path_jaad = "/home/steven/submission_T_IV/JAAD"
+path_jaad = "/home/jvn-server/Desktop/zahraa/exp2/Pedestrian_Crossing_Intention_Prediction/JAAD"
 path_pie = "/media/steven/MEDIA/PIE"
 
 # config = tf.compat.v1.ConfigProto()
