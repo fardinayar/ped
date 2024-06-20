@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.layers import Input, Concatenate, Dense
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -86,11 +87,12 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.d_model = d_model
         self.d_point_wise_ff = d_point_wise_ff
         self.dropout_prob = dropout_prob
-
+        self.dense = Dense(d_model)
         self.multi_head_attention = MultiHeadAttention(attention_head_count, d_model)
         self.dropout_1 = tf.keras.layers.Dropout(dropout_prob)
         self.layer_norm_1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-
+        # TODO
+        self.encoder_embedding_layer = Embeddinglayer(d_model)
         self.position_wise_feed_forward_layer = PositionWiseFeedForwardLayer(
             d_point_wise_ff,
             d_model
@@ -99,6 +101,8 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.layer_norm_2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     def call(self, inputs, mask, training):
+        inputs = self.dense(inputs)
+        inputs = self.encoder_embedding_layer(inputs)
         output, attention = self.multi_head_attention(inputs, inputs, inputs, mask)
         output = self.dropout_1(output, training=training)
         output = self.layer_norm_1(tf.add(inputs, output))  # residual network
@@ -122,8 +126,8 @@ class EncoderLayer(tf.keras.layers.Layer):
 
 
 class DecoderLayer(tf.keras.layers.Layer):
-    def __init__(self, attention_head_count, d_model, d_point_wise_ff, dropout_prob):
-        super(DecoderLayer, self).__init__()
+    def __init__(self, attention_head_count, d_model, d_point_wise_ff, dropout_prob, **kwargs):
+        super(DecoderLayer, self).__init__(**kwargs)
 
         # model hyper parameter variables
         self.attention_head_count = attention_head_count
@@ -169,7 +173,16 @@ class DecoderLayer(tf.keras.layers.Layer):
         output = self.layer_norm_3(tf.add(encoder_decoder_attention_output, output))  # residual network
 
         return output, attention_1, attention_2
-
+    
+    def get_config(self):
+        config = super(DecoderLayer, self).get_config()
+        config.update({
+            'attention_head_count': self.attention_head_count,
+            'd_model': self.d_model,
+            'd_point_wise_ff': self.d_point_wise_ff,
+            'dropout_prob': self.dropout_prob,
+        })
+        return config
 
 class PositionWiseFeedForwardLayer(tf.keras.layers.Layer):
     def __init__(self, d_point_wise_ff, d_model):
@@ -276,17 +289,14 @@ class ScaledDotProductAttention(tf.keras.layers.Layer):
 
 
 class Embeddinglayer(tf.keras.layers.Layer):
-    def __init__(self, vocab_size, d_model):
+    def __init__(self, d_model):
         # model hyper parameter variables
         super(Embeddinglayer, self).__init__()
-        self.vocab_size = vocab_size
         self.d_model = d_model
 
-        self.embedding = tf.keras.layers.Embedding(vocab_size, d_model)
-
     def call(self, sequences):
+        output = sequences
         max_sequence_len = sequences.shape[1]
-        output = self.embedding(sequences) * tf.sqrt(tf.cast(self.d_model, dtype=tf.float32))
         output += self.positional_encoding(max_sequence_len)
 
         return output

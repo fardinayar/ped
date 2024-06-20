@@ -25,7 +25,7 @@ from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
 from sklearn.svm import LinearSVC
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from transformer import EncoderLayer
+from transformer import EncoderLayer, DecoderLayer
 ## For deeplabV3 (segmentation)
 import numpy as np
 from PIL import Image
@@ -355,6 +355,17 @@ class ActionPredict(object):
                         img_features = tf.squeeze(img_features)
                         # with tf.compact.v1.Session():
                         img_features = img_features.numpy()
+                    elif crop_type == 'local_depth_cnn':
+                        # TTTTTT
+                        img = image.load_img(imp.replace('/image/', '/image_depth/'), target_size=(224, 224))
+                        x = image.img_to_array(img)
+                        x = np.expand_dims(x, axis=0)
+                        x = clip_processor(images=x, return_tensors="tf")
+                        block4_pool_features = clip_model.get_image_features(**x)
+                        img_features = block4_pool_features
+                        img_features = tf.squeeze(img_features)
+                        # with tf.compact.v1.Session():
+                        img_features = img_features.numpy()
 
                     elif crop_type == 'mask_cnn':
                         img_data = cv2.imread(imp)
@@ -639,7 +650,8 @@ class ActionPredict(object):
              'box': data_raw['bbox'].copy(),
              'ped_id': data_raw['pid'].copy(),
              'crossing': data_raw['activities'].copy(),
-             'image': data_raw['image'].copy()}
+             'image': data_raw['image'].copy(),
+             'looking': data_raw['looking'].copy()}
 
         balance = opts['balance_data'] if data_type == 'train' else False
         obs_length = opts['obs_length']
@@ -794,7 +806,7 @@ class ActionPredict(object):
         elif 'mask' in feature_type:
             data_gen_params['crop_type'] = 'mask'
             # data_gen_params['crop_mode'] = 'pad_resize'
-        elif 'local_context_cnn' in feature_type:
+        elif 'local_context_cnn' in feature_type or 'local_depth_cnn' in feature_type:
             data_gen_params['crop_type'] = 'local_context_cnn'
         elif 'local_context' in feature_type:
             data_gen_params['crop_type'] = 'context'
@@ -852,7 +864,7 @@ class ActionPredict(object):
         data_types = []
 
         for d_type in model_opts['obs_input_type']:
-            if 'local' in d_type or 'context' in d_type or 'mask' in d_type:
+            if 'local' in d_type or 'context' in d_type or 'mask' in d_type or 'depth' in d_type:
                 features, feat_shape = self.get_context_data(model_opts, data, data_type, d_type)
             elif 'pose' in d_type:
                 path_to_pose, _ = get_path(save_folder='poses',
@@ -1098,7 +1110,8 @@ class ActionPredict(object):
             # except:
             #     model_opts = pickle.load(fid, encoding='bytes')
 
-        test_model = load_model(os.path.join(model_path, 'model.h5'), custom_objects={'EncoderLayer':EncoderLayer})
+        test_model = load_model(os.path.join(model_path, 'model.h5'), custom_objects={'EncoderLayer':EncoderLayer,
+                                                                                      'DecoderLayer':DecoderLayer})
         test_model.summary()
 
         test_data = self.get_data('test', data_test, {**opts['model_opts'], 'batch_size': 1})
@@ -4847,58 +4860,37 @@ class MASK_PCPA_2D(ActionPredict):
         # network_inputs.append(conv3d_model.input)
         #
         attention_size = self._num_hidden_units
-        #
-        # if self._backbone == 'i3d':
-        #     x = Flatten(name='flatten_output')(conv3d_model.output)
-        #     x = Dense(name='emb_' + self._backbone,
-        #               units=attention_size,
-        #               activation='sigmoid')(x)
-        # else:
-        #     x = conv3d_model.output
-        #     x = Dense(name='emb_' + self._backbone,
-        #               units=attention_size,
-        #               activation='sigmoid')(x)
-        #
-        # encoder_outputs.append(x)
-
-        # self._conv_models = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50, 'alexnet': AlexNet}
-        # # self._backbone = backbone
-        # data_size = data_params['data_sizes'][0]
-        # input_data = Input(shape=data_size, name='input_' + data_types[0])
-        # context_net = self._conv_models[self._backbone](input_tensor=input_data,input_shape=data_size,
-        #                                                 include_top=False, weights=self._weights,
-        #                                                 pooling=self._pooling)
-        # x=context_net.outputs[0]
-
-        network_inputs.append(Input(shape=data_sizes[0], name='input_cnn_' + data_types[0]))
-        encoder_outputs.append(
-            EncoderLayer(4, data_sizes[0][-1], attention_size, 0.5)(network_inputs[0], None)[0] #self._rnn(name='enc_' + data_types[0], r_sequence=return_sequence)(network_inputs[0]))
-        )
-        network_inputs.append(Input(shape=data_sizes[1], name='input_cnn2_' + data_types[1]))
-        encoder_outputs.append(
-            EncoderLayer(4, data_sizes[1][-1], attention_size, 0.5)(network_inputs[1], None)[0] #self._rnn(name='enc2_' + data_types[1], r_sequence=return_sequence)(network_inputs[1]))
-        )
-        # encoder_outputs.append(x)
-
-        # output = Dense(self._num_classes,
-        #                activation=self._dense_activation,
-        #                name='output_dense')(context_net.outputs[0])
-        # net_model = Model(inputs=context_net.inputs[0], outputs=output)
-
-
-        for i in range(2, core_size):
+        for i in range(0, core_size):
             network_inputs.append(Input(shape=data_sizes[i], name='input_' + data_types[i]))
-            encoder_input = Dense(attention_size)(network_inputs[i])
-            encoder_output = EncoderLayer(4, attention_size, attention_size, 0.5)(encoder_input, None)[0]#self._rnn(name='enc_1_' + data_types[i], r_sequence=return_sequence)(network_inputs[i])
-            encoder_outputs.append(encoder_output)
+
+        x = self._rnn(name='enc0_' + data_types[0], r_sequence=return_sequence)(network_inputs[0])
+        encoder_outputs.append(x)
+        x = self._rnn(name='enc1_' + data_types[1], r_sequence=return_sequence)(network_inputs[1])
+        encoder_outputs.append(x)
+        x = self._rnn(name='enc2_' + data_types[2], r_sequence=return_sequence)(network_inputs[2])
+        encoder_outputs.append(x)
+        x = self._rnn(name='enc3_' + data_types[3], r_sequence=return_sequence)(network_inputs[3])
+        # current = [x, network_inputs[1]]
+        # x = Concatenate(name='concat_early1', axis=2)(current)
+        # x = self._rnn(name='enc1_' + data_types[1], r_sequence=return_sequence)(x)
+        # current = [x, network_inputs[2]]
+        # x = Concatenate(name='concat_early2', axis=2)(current)
+        # x = self._rnn(name='enc2_' + data_types[2], r_sequence=return_sequence)(x)
+        current = [x, network_inputs[4]]
+        x = Concatenate(name='concat_early3', axis=2)(current)
+        x = self._rnn(name='enc3_' + data_types[4], r_sequence=return_sequence)(x)
+        current = [x,network_inputs[5]]
+        x = Concatenate(name='concat_early4', axis=2)(current)
+        x = self._rnn(name='enc4_' + data_types[5], r_sequence=return_sequence)(x)
+        current = [x,network_inputs[6]]
+        x = Concatenate(name='concat_early5', axis=2)(current)
+        x = self._rnn(name='enc4_' + data_types[6], r_sequence=return_sequence)(x)
+        encoder_outputs.append(x)
+
+
 
         if len(encoder_outputs) > 1:
             att_enc_out = []
-            # x = Lambda(lambda x: K.expand_dims(x, axis=1))(encoder_outputs[0])
-            # att_enc_out.append(x)  # first output is from 3d conv netwrok
-            # # x = Lambda(lambda x: K.expand_dims(x, axis=1))(encoder_outputs[0])
-            # # att_enc_out.append(x)  # first output is from 3d conv netwrok
-
             # for recurrent branches apply many-to-one attention block
             for i, enc_out in enumerate(encoder_outputs[0:]):
                 x = attention_3d_block(enc_out, dense_size=attention_size, modality='_' + data_types[i])
@@ -4907,11 +4899,13 @@ class MASK_PCPA_2D(ActionPredict):
                 att_enc_out.append(x)
             # aplly many-to-one attention block to the attended modalities
             x = Concatenate(name='concat_modalities', axis=1)(att_enc_out)
-            encodings = MultiHeadAttention(4, attention_size)(x, x)#attention_3d_block(x, dense_size=attention_size, modality='_modality')
-            encodings = GlobalAvgPool1D()(encodings)
+            encodings = attention_3d_block(x, dense_size=attention_size, modality='_modality')
+
+            # print(encodings.shape)
             # print(weights_softmax.shape)
         else:
             encodings = encoder_outputs[0]
+            encodings = attention_3d_block(encodings, dense_size=attention_size, modality='_modality')
 
         model_output = Dense(1, activation='sigmoid',
                              name='output_dense',

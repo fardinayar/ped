@@ -20,4 +20,4 @@ data/features/jaad/mask_cnn_vgg_raw
 data/models/
 *.png
 *.zip
-
+*.pkl

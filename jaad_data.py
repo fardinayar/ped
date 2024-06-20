@@ -1140,6 +1140,7 @@ class JAAD(object):
         height_rng = params['height_rng']
         image_seq, pids_seq = [], []
         box_seq, center_seq, occ_seq = [], [], []
+        looking_seq = []
         intent_seq = []
         vehicle_seq = []
         activities = []
@@ -1172,6 +1173,7 @@ class JAAD(object):
                 else:
                    end_idx = frame_ids.index(event_frame)
                 boxes = pid_annots[pid]['bbox'][:end_idx + 1]
+                looking = np.array(pid_annots[pid]['looking_score'][:end_idx + 1])[:,None]
                 frame_ids = frame_ids[: end_idx + 1]
                 images = [self._get_image_path(vid, f) for f in frame_ids]
                 occlusions = pid_annots[pid]['occlusion'][:end_idx + 1]
@@ -1191,7 +1193,7 @@ class JAAD(object):
                 box_seq.append(boxes[::seq_stride])
                 center_seq.append([self._get_center(b) for b in boxes][::seq_stride])
                 occ_seq.append(occlusions[::seq_stride])
-
+                looking_seq.append(looking[::seq_stride])
                 ped_ids = [[pid]] * len(boxes)
                 pids_seq.append(ped_ids[::seq_stride])
 
@@ -1219,6 +1221,7 @@ class JAAD(object):
                 'bbox': box_seq,
                 'center': center_seq,
                 'occlusion': occ_seq,
+                'looking': looking_seq,
                 'vehicle_act': vehicle_seq,
                 'intent': intent_seq,
                 'activities': activities,
